@@ -48,15 +48,16 @@ class CIFAR10(data.Dataset):
         ['test_batch', '40351d587109b95175f43aff81a1287e'],
     ]
 
-    def __init__(self, target_label, root, train=True,
+    def __init__(self, target_label, sorted_train_list, root, train=True,
                  transform=None, target_transform=None,
-                 download=False, confusion_matrix=None):
+                 download=False, augment=True):
         self.root = os.path.expanduser(root)
+        self.sorted_train_list = sorted_train_list
+        self.augment = augment
         self.transform = transform
         self.target_transform = target_transform
         self.train = train  # training set or test set
         self.target_label = target_label
-        self.confusion_matrix = confusion_matrix
         assert 0 <= self.target_label <= 9
         #if download:
         #    print("Cannot download on custom class, please download another way")
@@ -70,8 +71,7 @@ class CIFAR10(data.Dataset):
         if self.train:
             self.train_data = []
             self.train_labels = []
-            
-            is_selective = False if self.confusion_matrix is None else True
+            is_selective = False if len(self.sorted_train_list) == 0 else True
             #Iterate through data batches 
             for fentry in self.train_list:
                 f = fentry[0]
@@ -82,13 +82,23 @@ class CIFAR10(data.Dataset):
                     entry = pickle.load(fo)
                 else:
                     entry = pickle.load(fo, encoding='latin1')
-                
-                batch_train_data, batch_train_label = self.extract_data(entry, self.target_label, balanced= not is_selective)
+               
+                batch_train_data, batch_train_label = self.extract_data(entry, self.target_label, augment = self.augment)
                 self.train_data.append(batch_train_data)
                 self.train_labels += batch_train_label
                 #self.select_target(batch_train_label, self.target_label)
 
-                """
+            self.train_data = np.concatenate(self.train_data)
+                
+            if is_selective:
+                print("Selecting data based on sorted list...")
+                self.train_data, self.train_label = self.extract_data_from_idx(self.target_label, self.train_data, self.train_labels, self.sorted_train_list)
+            self.train_data = self.train_data.reshape((-1, 3, 32, 32))
+            self.train_data = self.train_data.transpose((0, 2, 3, 1))  # convert to HWC
+            print(self.train_data.shape) 
+            self.train_labels = self.select_target(self.train_labels, self.target_label)
+                
+            """
                 self.train_data.append(entry['data'])
                 
                 if 'labels' in entry:
@@ -98,19 +108,9 @@ class CIFAR10(data.Dataset):
                     #print(type(entry['fine_labels']))
                     self.train_labels += self.select_target(entry['fine_labels'], self.target_label)
                 fo.close()
-                """
-            self.train_data = np.concatenate(self.train_data)
-            self.train_data = self.train_data.reshape((-1, 3, 32, 32))
-            self.train_data = self.train_data.transpose((0, 2, 3, 1))  # convert to HWC
-            if is_selective:
-                class_ratio_list = self.get_class_ratio_list(target_label, self.confusion_matrix)
-                self.train_data, self.train_labels = self.selected_data(self.train_data, self.train_labels, class_ratio_list)
-                print("training class ratios: ")
-                print(class_ratio_list)
-                print("training data shape: " + str(self.train_data.shape))
-                #print(len(self.train_labels))
-            self.train_labels = self.select_target(self.train_labels, self.target_label)
-
+            """                        
+                
+            
         else:
             f = self.test_list[0][0]
             file = os.path.join(self.root, self.base_folder, f)
@@ -187,7 +187,7 @@ class CIFAR10(data.Dataset):
         tar.close()
         os.chdir(cwd)
     """
-    def extract_data(self, entry, target_label, balanced):
+    def extract_data(self, entry, target_label, augment):
         data = entry['data'].reshape(-1,3072)
         label = entry['labels']
         result_data = []
@@ -195,7 +195,7 @@ class CIFAR10(data.Dataset):
         for idx, val in enumerate(label):
             if(val == target_label):
                 #Increase target sample amount
-                if balanced:
+                if augment:
                     for i in range(9):
                         result_data.append(data[idx])
                         result_label.append(val)
@@ -210,37 +210,23 @@ class CIFAR10(data.Dataset):
         #print(result_data.shape[0])
         #print(len(result_label))
         return result_data, result_label
-    
-    def get_class_ratio_list(self, target_label, confusion_matrix):
-        if confusion_matrix is None:
-            return []
-        #Obtain the class proportions on misclassified samples
-        class_column = confusion_matrix[:, target_label]
-        misclassified_sum = np.sum(class_column[:target_label])
-        misclassified_sum += np.sum(class_column[target_label+1:]) if target_label!=9 else 0
-        class_ratio_list = []
-        for i in range(10):
-            if(i == target_label):
-                class_ratio_list.append(1.0)
-            else:
-                class_ratio_list.append(class_column[i]/misclassified_sum)
-        return class_ratio_list
 
-    def selected_data(self, train_data, train_labels, class_ratio_list):
+    def extract_data_from_idx(self, target_label, train_data, train_label, sorted_idx_list):
+        data = train_data.reshape(-1, 3072)
+        label = train_label
         result_data = []
         result_label = []
-       
-        #Create dataset
-        for idx, val in enumerate(train_labels):
-            if(np.random.uniform() <= class_ratio_list[val]):
-                result_data.append(train_data[idx])
-                result_label.append(val)
+        for idx in sorted_idx_list:
+            if(label[idx] == target_label):
+                for i in range(8):
+                    result_data.append(data[idx])
+                    result_label.append(label[idx])
+            for i in range(4):
+                result_data.append(data[idx])
+                result_label.append(label[idx])
         
-        result_data = np.asarray(result_data).reshape((-1,)+train_data.shape[1:])
-        #print(result_data.shape[0])
-        #print(len(result_label))
+        result_data = np.asarray(result_data).reshape(-1, 3072)
         return result_data, result_label
-        
 
     def select_target(self, label_list, target_label):
         for idx, val in enumerate(label_list):

@@ -62,7 +62,7 @@ def main():
     num_classes = 10 if args.dataset == 'cifar10' else 100
 
     val_loader = torch.utils.data.DataLoader(
-        datasets.__dict__[args.dataset.upper()]('.', train=False, transform=transform_test),
+        datasets.__dict__[args.dataset.upper()]('../data', train=False, transform=transform_test),
         batch_size=args.batch_size, shuffle=False, **kwargs)
     
     # load models
@@ -127,7 +127,7 @@ def test_models(model_list, retrained_model_list, val_loader, num_classes):
         score_matrix = None
         if not os.path.isfile(score_batch_i_path):
             score_matrix = torch.zeros((input.shape[0], num_classes))#shape=128*10
-            score_matrix.fill_(-2.0)
+            score_matrix.fill_(-100)
         else:
             score_matrix = torch.load(score_batch_i_path)
             #score_matrix[:,[idx for idx in range(0, num_classes) if idx not in model_list]] = -2.0
@@ -143,7 +143,7 @@ def test_models(model_list, retrained_model_list, val_loader, num_classes):
                 output = model(input_var)#128x2
 
                 # measure activation level and record loss:
-                scored_output = output[:,1]# - output[:,0]#128*1
+                scored_output = output[:,1] - output[:,0]#128*1
                 score_matrix[:,idx] = scored_output.data
             #else:
             #    print("Model ({0}) test results already computed".format(idx))

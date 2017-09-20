@@ -154,7 +154,7 @@ def main():
         prec1 = validate(val_loader, model, criterion, epoch)
         # remember best prec@1 and save checkpoint
         #average_error = 2.0-average_pos + 2.0-average_neg#Max=2.0 due to tanh
-        is_best =  prec1 < best_prec1
+        is_best =  prec1 > best_prec1
         best_prec1 = max(best_prec1, prec1)
         #best_error = min(best_error, average_error)
         save_checkpoint({

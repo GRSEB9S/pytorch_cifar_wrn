@@ -67,9 +67,26 @@ def main():
     global args, best_error, best_prec1
     args = parser.parse_args()
     args.name = str(args.layers)+'-'+str(args.widen_factor)+'-'+str(args.droprate)+'-'+args.name
-    args.lr = 0.00001 if args.selective_train else args.lr
+    args.lr = 0.000005 if args.selective_train else args.lr
     #direcotry example: runs_cifar10/0/28-4-WideResNet...model
     if args.tensorboard: configure("runs_"+args.dataset+"/%s"%(str(args.target_label)))#%(args.name))
+   
+    fine_tune_dir = None 
+    fine_tune_run_dir = None
+    fine_tune_test_dir = None
+    if args.selective_train:
+        fine_tune_dir = "finetune"
+        if not os.path.exists(fine_tune_dir):
+            os.makedirs(fine_tune_dir)
+        fine_tune_run_dir = os.path.join(fine_tune_dir, "runs")
+        if not os.path.exists(fine_tune_run_dir):
+            os.makedirs(fine_tuen_run_dir)
+        fine_tune_run_dir = os.path.join(fine_tune_dir, "runs", str(args.target_label))
+        if not os.path.exists(fine_tune_run_dir):
+            os.makedirs(fine_tune_run_dir)
+        fine_tune_test_dir = os.path.join(fine_tune_dir, "test_results")
+        if not os.path.exists(fine_tune_test_dir):
+            os.makedirs(fine_tune_test_dir)
 
     # Data loading code
     normalize = transforms.Normalize(mean=[x/255.0 for x in [125.3, 123.0, 113.9]],
@@ -112,7 +129,7 @@ def main():
         batch_size=args.batch_size, shuffle=True, **kwargs)
     """
     val_loader = torch.utils.data.DataLoader(
-            CIFAR10(args.target_label, '../data', train=False, transform=transform_test),
+            CIFAR10(args.target_label, [], '../data', train=False, transform=transform_test),
             batch_size=args.batch_size, shuffle=False, **kwargs)
     #This keeps the original labels from 0~9    
     val_loader_original = torch.utils.data.DataLoader(
@@ -157,6 +174,7 @@ def main():
     for epoch in range(args.start_epoch, args.epochs):
         #For fine-tuning & selective training
         c_matrix = None
+        """
         if args.selective_train:
             print("Training with selected proportion based on confusion matrix")
             confusion_file_path = os.path.join(TEST_DIR, "confusion_matrix")
@@ -164,10 +182,21 @@ def main():
                 c_matrix = torch.load(confusion_file_path)
                 old_best_prec1 = compute_c_matrix_prec(c_matrix)
                 print("Current overall accuracy:{0:.3f}".format(old_best_prec1))
-        
+        """
+        sorted_train_list = []
+        if args.selective_train:
+            # Go through the training data first to find the least correct samples
+            print("Finding least scored training samples...")
+            train_loader_original = torch.utils.data.DataLoader(
+                CIFAR10(args.target_label, sorted_train_list, '../data', train=True, download=True, 
+                transform=transform_train, augment=False),
+                batch_size=args.batch_size, shuffle=False, **kwargs)
+            
+            sorted_train_list = validate_train(train_loader_original, model, criterion, epoch)
+ 
         train_loader = torch.utils.data.DataLoader(
-            CIFAR10(args.target_label, '../data', train=True, download=True, 
-            transform=transform_train, confusion_matrix=c_matrix),
+            CIFAR10(args.target_label, sorted_train_list[:10000], '../data', train=True, download=True, 
+            transform=transform_train),
             batch_size=args.batch_size, shuffle=True, **kwargs)
         
         adjust_learning_rate(optimizer, epoch+1)
@@ -177,17 +206,17 @@ def main():
 
         # evaluate on validation set
         # modifying...prec1 = validate(val_loader, model, criterion, epoch)
-        average_pos, average_neg, confusion_matrix, score_batch_list, accuracy_list = validate_single(val_loader, val_loader_original, model, criterion, epoch, update_c_matrix = args.selective_train)
+        average_pos, average_neg, confusion_matrix, score_batch_list, accuracy_list = validate_single(val_loader, val_loader_original, model, criterion, epoch, update_c_matrix = args.selective_train, fine_tune_test_dir=fine_tune_test_dir)
         # remember best prec@1 and save checkpoint
         average_error = 2.0-average_pos + 2.0-average_neg#Max=2.0 due to tanh
         average_prec1 = compute_c_matrix_prec(confusion_matrix.value())
-        is_best = average_error < best_error if not args.selective_train else average_prec1 > old_best_prec1
+        is_best = average_error < best_error #average_error < best_error if not args.selective_train else average_prec1 > old_best_prec1
         best_error = min(best_error, average_error)
         save_checkpoint({
             'epoch': epoch + 1,
             'state_dict': model.state_dict(),
             'best_error': best_error,
-        }, is_best)
+        }, is_best, fine_tune_run_dir)
         # Save score batch list if it's best
         if(args.selective_train):
             print("Confusion Matrix---")
@@ -197,7 +226,7 @@ def main():
             print([class_accuracy.avg for class_accuracy in accuracy_list])
             if(is_best):
                 print("****New best overall accuracy: {0:.3f}****".format(average_prec1))
-                save_test_results(confusion_matrix, score_batch_list)
+            save_test_results(is_best, fine_tune_test_dir, confusion_matrix, score_batch_list)
         
     print('***Smallest MSE: ' +  str(best_error) + "***")
 
@@ -269,7 +298,7 @@ def train_single(train_loader, model, criterion, optimizer, epoch):
 
         # compute output
         output = model(input_var)
-        loss = criterion(output, target_var)#TO BE CONTINUED
+        loss = criterion(output, target_var)
         
         # measure accuracy and record loss
         #prec1 = accuracy(output.data, target, topk=(1,))[0]
@@ -348,7 +377,7 @@ def validate(val_loader, model, criterion, epoch):
         log_value('val_acc', top1.avg, epoch)
     return top1.avg
 
-def validate_single(val_loader, val_loader_original, model, criterion, epoch, update_c_matrix=False):
+def validate_single(val_loader, val_loader_original, model, criterion, epoch, update_c_matrix=False, fine_tune_test_dir=None):
     """Perform validation on the validation set"""
     #Confusion matrix
     num_classes = 10
@@ -380,8 +409,9 @@ def validate_single(val_loader, val_loader_original, model, criterion, epoch, up
         # confusion matrix
         if(update_c_matrix == True):
             #Obtain the original target, not 0,1
+            DEST_DIR = TEST_DIR if fine_tune_test_dir is None else fine_tune_test_dir
             target_orig = target2
-            score_batch_i_path = os.path.join(TEST_DIR, 'batch-'+str(i)+'-score')
+            score_batch_i_path = os.path.join(DEST_DIR, 'batch-'+str(i)+'-score')
             score_matrix = torch.load(score_batch_i_path)
             scored_output = 1.5*output[:,1] - output[:,0]
             score_matrix[:,args.target_label] = scored_output.data
@@ -428,10 +458,43 @@ def validate_single(val_loader, val_loader_original, model, criterion, epoch, up
 
     return average_pos.avg, average_neg.avg, confusion_matrix, score_batch_list, accuracy_list
 
+def validate_train(train_loader, model, criterion, epoch):
+    """Perform validation on the training set"""
+    idx_list = []
+    score_list = []
+    sorted_train_list = []
+    # switch to evaluate mode
+    model.eval()
+    
+    for i, (input, target) in enumerate(train_loader):
+        target_cuda = target.cuda(async=True)
+        input = input.cuda()
+        input_var = torch.autograd.Variable(input, volatile=True)
+        target_var = torch.autograd.Variable(target_cuda, volatile=True)
+        # compute output
+        output = model(input_var)
+        score = output[:,1] - output[:,0]
+        score = score.data.cpu()*(target*2-1).float()
+        # append the output score to the list
+        idx_list += [idx+i*input.shape[0] for idx in range(input.shape[0])]
+        score_list += [score[idx] for idx in range(score.shape[0])]
+   
+    score_idx_list = zip(score_list, idx_list) 
+    sorted_train_list = [(score, idx) for score, idx in sorted(score_idx_list, key = lambda pair : pair[0])]
+    
+    print("Sorted list info")
+    print(len(sorted_train_list))
+    sorted_score_list, sorted_idx_list = zip(*sorted_train_list)
+    for i in range(20):
+        print(sorted_idx_list[i])
+        print(sorted_score_list[i])
 
-def save_checkpoint(state, is_best, filename='checkpoint.pth.tar'):
+    return sorted_idx_list#sorted_train_list#train_data_list, train_label_list, score_list
+
+
+def save_checkpoint(state, is_best, fine_tune_run_dir, filename='checkpoint.pth.tar'):
     """Saves checkpoint to disk"""
-    directory = os.path.join("runs_"+args.dataset, str(args.target_label))
+    directory = os.path.join("runs_"+args.dataset, str(args.target_label)) if fine_tune_run_dir is None else fine_tune_run_dir
     if not os.path.exists(directory):
         os.makedirs(directory)
     filename = os.path.join(directory ,filename)
@@ -441,13 +504,22 @@ def save_checkpoint(state, is_best, filename='checkpoint.pth.tar'):
         shutil.copyfile(filename, os.path.join(directory , args.name+'_model_best.pth.tar'))
         print("Best model saved success")
 
-def save_test_results(confusion_matrix, score_batch_list):
-    print("Saving test batches & confusion matrix")
-    c_matrix_path = os.path.join(TEST_DIR, "confusion_matrix")
-    torch.save(confusion_matrix.value(), c_matrix_path)
-    for idx, score_batch in enumerate(score_batch_list):
-        score_batch_i_path = os.path.join(TEST_DIR, 'batch-'+str(idx)+'-score')
-        torch.save(score_batch, score_batch_i_path)
+def save_test_results(is_best, fine_tune_dir, confusion_matrix, score_batch_list):
+    if fine_tune_dir is None and is_best:
+        print("Saving test batches & confusion matrix")
+        c_matrix_path = os.path.join(TEST_DIR, "confusion_matrix")
+        torch.save(confusion_matrix.value(), c_matrix_path)
+        for idx, score_batch in enumerate(score_batch_list):
+            score_batch_i_path = os.path.join(TEST_DIR, 'batch-'+str(idx)+'-score')
+            torch.save(score_batch, score_batch_i_path)
+    elif not fine_tune_dir is None:
+        print("(fine tune)Saving test batches & confusion matrix")
+        c_matrix_path = os.path.join(fine_tune_dir, "confusion_matrix")
+        torch.save(confusion_matrix.value(), c_matrix_path)
+        for idx, score_batch in enumerate(score_batch_list):
+            score_batch_i_path = os.path.join(fine_tune_dir, 'batch-'+str(idx)+'-score')
+            torch.save(score_batch, score_batch_i_path)
+
 
 class AverageMeter(object):
     """Computes and stores the average and current value"""
@@ -511,12 +583,17 @@ def activation_level(output, target, positive=True):
     selected_outputs_opposite = output_opposite[target == target_label]
     if(len(selected_outputs_normal.shape) == 0):
         return 0,0
+    #wrong_outputs = selected_outputs_normal[selected_outputs_normal <= selected_outputs_opposite]
+    #print("Incorrect")
+    #print(len(wrong_outputs))
     norm_mean = torch.mean(selected_outputs_normal)
     oppo_mean = torch.mean(selected_outputs_opposite)
-    if(norm_mean < -1 or norm_mean > 1 or oppo_mean < -1 or oppo_mean > 1):
-        print("norm_mean:" + str(norm_mean) + " oppo_mean:"+str(oppo_mean))
+
+    #if(norm_mean < -1 or norm_mean > 1 or oppo_mean < -1 or oppo_mean > 1):
+    #    print("norm_mean:" + str(norm_mean) + " oppo_mean:"+str(oppo_mean))
     #print(selected_outputs_normal.shape)
     #print(selected_outputs_normal.size(0))
+    
     return norm_mean-oppo_mean, selected_outputs_normal.shape[0]
 
 if __name__ == '__main__':
